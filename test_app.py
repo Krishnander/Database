@@ -7,11 +7,14 @@ from database import KeyValueStore
 class KeyValueStoreTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_database.json'
-        self.db = KeyValueStore(db_file=self.db_file)
+        self.wal_file = self.db_file + '.wal'
+        self.db = KeyValueStore(db_file=self.db_file, wal_max_entries=3)
 
     def tearDown(self):
         if os.path.exists(self.db_file):
             os.remove(self.db_file)
+        if os.path.exists(self.wal_file):
+            os.remove(self.wal_file)
 
     def test_set_get(self):
         self.db.set('name', 'Jules')
@@ -23,31 +26,47 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.assertIsNone(self.db.get('city'))
         self.assertFalse(self.db.delete('non_existent_key'))
 
-    def test_persistence(self):
+    def test_wal_recovery(self):
         self.db.set('country', 'France')
-        # Create a new instance to see if it loads from the file
+        self.db.set('capital', 'Paris')
+        self.db.delete('country')
+
+        # Create a new instance to trigger recovery
         new_db = KeyValueStore(db_file=self.db_file)
-        self.assertEqual(new_db.get('country'), 'France')
+        self.assertEqual(new_db.get('capital'), 'Paris')
+        self.assertIsNone(new_db.get('country'))
+
+    def test_compaction(self):
+        self.db.set('a', '1')
+        self.db.set('b', '2')
+        self.db.set('c', '3') # This should trigger compaction
+
+        self.assertTrue(os.path.exists(self.db_file))
+        self.assertFalse(os.path.exists(self.wal_file))
+
+        # Verify data is correct after compaction
+        new_db = KeyValueStore(db_file=self.db_file)
+        self.assertEqual(new_db.get('a'), '1')
+        self.assertEqual(new_db.get('b'), '2')
+        self.assertEqual(new_db.get('c'), '3')
+
 
 class FlaskApiTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_api_database.json'
+        self.wal_file = self.db_file + '.wal'
         app.config['TESTING'] = True
-        # In a real app, you would use a factory or dependency injection
-        # to ensure the app uses a test-specific database instance.
-        # For this simple case, we'll create a new KeyValueStore instance
-        # for testing and assign it to a new test client.
         self.db = KeyValueStore(db_file=self.db_file)
-        self.app = app.test_client()
-        # This is a bit of a hack. A better approach would be to use Flask's
-        # application context to manage the database connection.
         import app as flask_app
         flask_app.db = self.db
+        self.app = app.test_client()
 
 
     def tearDown(self):
         if os.path.exists(self.db_file):
             os.remove(self.db_file)
+        if os.path.exists(self.wal_file):
+            os.remove(self.wal_file)
 
     def test_set_api(self):
         response = self.app.post('/set',
