@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  primary:
+    build: .
+    ports:
+      - "5000:5000"
+    command: >
+      sh -c "python app.py --port 5000 --role primary --replicas http://replica1:5001,http://replica2:5002"
+
+  replica1:
+    build: .
+    ports:
+      - "5001:5001"
+    command: >
+      sh -c "sleep 5 && python app.py --port 5001 --role replica --primary-address http://primary:5000"
+    depends_on:
+      - primary
+
+  replica2:
+    build: .
+    ports:
+      - "5002:5002"
+    command: >
+      sh -c "sleep 5 && python app.py --port 5002 --role replica --primary-address http://primary:5000"
+    depends_on:
+      - primary

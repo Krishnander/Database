@@ -1,13 +1,20 @@
 import json
 import os
+import requests
 
 class KeyValueStore:
-    def __init__(self, db_file='database.json', wal_max_entries=100):
+    def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
         self._db_file = db_file
         self._wal_file = db_file + '.wal'
         self._wal_max_entries = wal_max_entries
         self._wal_entries = 0
+        self._role = role
+        self._replicas = replicas if replicas is not None else []
         self._data = self._load_from_disk()
+
+    def add_replica(self, replica_url):
+        if replica_url not in self._replicas:
+            self._replicas.append(replica_url)
 
     def _load_from_disk(self):
         if os.path.exists(self._db_file):
@@ -60,16 +67,35 @@ class KeyValueStore:
         if self._wal_entries >= self._wal_max_entries:
             self._compact()
 
+    def _replicate(self, op, key, value=None):
+        for replica_url in self._replicas:
+            try:
+                payload = {'op': op, 'key': key}
+                if value is not None:
+                    payload['value'] = value
+
+                requests.post(f"{replica_url}/replicate", json=payload, timeout=0.5)
+            except requests.RequestException as e:
+                print(f"Error replicating to {replica_url}: {e}")
+
     def get(self, key):
         return self._data.get(key)
 
-    def set(self, key, value):
+    def set(self, key, value, replicated=False):
         self._data[key] = value
-        self._append_to_wal('set', key, value)
+        if self._role == 'primary':
+            self._append_to_wal('set', key, value)
+            self._replicate('set', key, value)
+        elif replicated:
+            self._append_to_wal('set', key, value)
 
-    def delete(self, key):
+    def delete(self, key, replicated=False):
         if key in self._data:
             del self._data[key]
-            self._append_to_wal('delete', key)
+            if self._role == 'primary':
+                self._append_to_wal('delete', key)
+                self._replicate('delete', key)
+            elif replicated:
+                self._append_to_wal('delete', key)
             return True
         return False
