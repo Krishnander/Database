@@ -118,5 +118,46 @@ class FlaskApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class TransactionTestCase(unittest.TestCase):
+    def setUp(self):
+        self.db_file = 'test_transaction_db.json'
+        self.wal_file = self.db_file + '.wal'
+        self.db = KeyValueStore(db_file=self.db_file)
+
+    def tearDown(self):
+        if os.path.exists(self.db_file):
+            os.remove(self.db_file)
+        if os.path.exists(self.wal_file):
+            os.remove(self.wal_file)
+
+    def test_commit(self):
+        transaction_id = self.db.begin()
+        self.db.add_op(transaction_id, 'set', 'a', 1)
+        self.db.add_op(transaction_id, 'set', 'b', 2)
+        self.assertTrue(self.db.commit(transaction_id))
+        self.assertEqual(self.db.get('a'), 1)
+        self.assertEqual(self.db.get('b'), 2)
+
+    def test_rollback(self):
+        self.db.set('a', 0)
+        transaction_id = self.db.begin()
+        self.db.add_op(transaction_id, 'set', 'a', 1)
+        self.assertTrue(self.db.rollback(transaction_id))
+        self.assertEqual(self.db.get('a'), 0)
+
+    def test_atomic_commit(self):
+        self.db.set('a', 0)
+        self.db.set('b', 0)
+        transaction_id = self.db.begin()
+        self.db.add_op(transaction_id, 'set', 'a', 1)
+        self.db.add_op(transaction_id, 'set', 'b', 'abc')
+
+        with patch.object(self.db, 'set', side_effect=Exception('Simulated failure')):
+            self.assertFalse(self.db.commit(transaction_id))
+
+        self.assertEqual(self.db.get('a'), 0)
+        self.assertEqual(self.db.get('b'), 0)
+
+
 if __name__ == '__main__':
     unittest.main()

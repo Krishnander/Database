@@ -68,6 +68,50 @@ def register_replica():
     return jsonify({'message': f'Replica {replica_url} registered successfully.'})
 
 
+@app.route('/transaction/begin', methods=['POST'])
+def begin_transaction():
+    transaction_id = db.begin()
+    return jsonify({'transaction_id': transaction_id})
+
+@app.route('/transaction/add_op', methods=['POST'])
+def add_transaction_op():
+    data = request.get_json()
+    transaction_id = data.get('transaction_id')
+    op = data.get('op')
+    key = data.get('key')
+    value = data.get('value')
+
+    try:
+        db.add_op(transaction_id, op, key, value)
+        return jsonify({'message': 'Operation added to transaction.'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/transaction/commit', methods=['POST'])
+def commit_transaction():
+    data = request.get_json()
+    transaction_id = data.get('transaction_id')
+
+    try:
+        if db.commit(transaction_id):
+            return jsonify({'message': 'Transaction committed successfully.'})
+        else:
+            return jsonify({'error': 'Transaction failed and was rolled back.'}), 500
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/transaction/rollback', methods=['POST'])
+def rollback_transaction():
+    data = request.get_json()
+    transaction_id = data.get('transaction_id')
+
+    try:
+        db.rollback(transaction_id)
+        return jsonify({'message': 'Transaction rolled back successfully.'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=5000)

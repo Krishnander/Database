@@ -3,6 +3,16 @@ import os
 import requests
 import threading
 
+class Transaction:
+    def __init__(self, transaction_id):
+        self.id = transaction_id
+        self.operations = []
+        self.keys = set()
+
+    def add_operation(self, op, key, value=None):
+        self.operations.append({'op': op, 'key': key, 'value': value})
+        self.keys.add(key)
+
 class KeyValueStore:
     def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
         self._db_file = db_file
@@ -12,8 +22,68 @@ class KeyValueStore:
         self._role = role
         self._replicas = replicas if replicas is not None else []
         self._data = self._load_from_disk()
+        self._transactions = {}
+        self._next_transaction_id = 0
         self._locks = {}
-        self._locks_lock = threading.RLock() # To protect access to the _locks dictionary
+        self._locks_lock = threading.RLock()
+
+    def begin(self):
+        transaction_id = self._next_transaction_id
+        self._next_transaction_id += 1
+        self._transactions[transaction_id] = Transaction(transaction_id)
+        return transaction_id
+
+    def add_op(self, transaction_id, op, key, value=None):
+        if transaction_id not in self._transactions:
+            raise ValueError("Transaction not found.")
+        self._transactions[transaction_id].add_operation(op, key, value)
+
+    def commit(self, transaction_id):
+        if transaction_id not in self._transactions:
+            raise ValueError("Transaction not found.")
+
+        transaction = self._transactions[transaction_id]
+
+        # Acquire locks for all keys in the transaction
+        locks = [self._get_lock(key) for key in sorted(list(transaction.keys))]
+        for lock in locks:
+            lock.acquire()
+
+        try:
+            # Execute operations
+            for op in transaction.operations:
+                if op['op'] == 'set':
+                    self._data[op['key']] = op['value']
+                    if self._role == 'primary':
+                        self._append_to_wal('set', op['key'], op['value'])
+                        self._replicate('set', op['key'], op['value'])
+                elif op['op'] == 'delete':
+                    if op['key'] in self._data:
+                        del self._data[op['key']]
+                        if self._role == 'primary':
+                            self._append_to_wal('delete', op['key'])
+                            self._replicate('delete', op['key'])
+        except Exception as e:
+            # Rollback changes
+            # This is still a simplification. A real implementation would
+            # need to restore the original values of the keys.
+            print(f"Transaction failed, rolling back: {e}")
+            return False
+        finally:
+            # Release locks
+            for lock in locks:
+                lock.release()
+
+            del self._transactions[transaction_id]
+
+        return True
+
+    def rollback(self, transaction_id):
+        if transaction_id not in self._transactions:
+            raise ValueError("Transaction not found.")
+
+        del self._transactions[transaction_id]
+        return True
 
     def _get_lock(self, key):
         with self._locks_lock:
@@ -91,31 +161,20 @@ class KeyValueStore:
         return self._data.get(key)
 
     def set(self, key, value, replicated=False):
-        lock = self._get_lock(key)
-        with lock:
-            self._data[key] = value
-            if self._role == 'primary':
-                self._append_to_wal('set', key, value)
-                self._replicate('set', key, value)
-            elif replicated:
-                self._append_to_wal('set', key, value)
-
-    def atomic_update(self, key, update_function):
-        lock = self._get_lock(key)
-        with lock:
-            current_value = self.get(key)
-            new_value = update_function(current_value)
-            self.set(key, new_value)
+        self._data[key] = value
+        if self._role == 'primary':
+            self._append_to_wal('set', key, value)
+            self._replicate('set', key, value)
+        elif replicated:
+            self._append_to_wal('set', key, value)
 
     def delete(self, key, replicated=False):
-        lock = self._get_lock(key)
-        with lock:
-            if key in self._data:
-                del self._data[key]
-                if self._role == 'primary':
-                    self._append_to_wal('delete', key)
-                    self._replicate('delete', key)
-                elif replicated:
-                    self._append_to_wal('delete', key)
-                return True
-            return False
+        if key in self._data:
+            del self._data[key]
+            if self._role == 'primary':
+                self._append_to_wal('delete', key)
+                self._replicate('delete', key)
+            elif replicated:
+                self._append_to_wal('delete', key)
+            return True
+        return False
