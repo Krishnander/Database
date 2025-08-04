@@ -6,10 +6,27 @@ import requests
 
 app = Flask(__name__)
 
+from functools import wraps
+
 # This will be initialized based on command-line arguments
 db = None
+VALID_API_KEYS = os.environ.get('API_KEYS', '').split(',') if os.environ.get('API_KEYS') else []
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'Authorization' not in request.headers:
+            return jsonify({'error': 'Authorization header is missing.'}), 401
+
+        api_key = request.headers['Authorization']
+        if api_key not in VALID_API_KEYS:
+            return jsonify({'error': 'Invalid API key.'}), 401
+
+        return f(*args, **kwargs)
+    return decorated_function
 
 @app.route('/get/<key>', methods=['GET'])
+@require_api_key
 def get_key(key):
     value = db.get(key)
     if value is not None:
@@ -18,6 +35,7 @@ def get_key(key):
         return jsonify({'error': 'Key not found'}), 404
 
 @app.route('/set', methods=['POST'])
+@require_api_key
 def set_key():
     if db._role == 'replica':
         return jsonify({'error': 'Cannot set key on a replica.'}), 403
@@ -30,6 +48,7 @@ def set_key():
     return jsonify({'message': f'Key "{key}" set successfully.'})
 
 @app.route('/delete/<key>', methods=['DELETE'])
+@require_api_key
 def delete_key(key):
     if db._role == 'replica':
         return jsonify({'error': 'Cannot delete key on a replica.'}), 403
@@ -69,11 +88,13 @@ def register_replica():
 
 
 @app.route('/transaction/begin', methods=['POST'])
+@require_api_key
 def begin_transaction():
     transaction_id = db.begin()
     return jsonify({'transaction_id': transaction_id})
 
 @app.route('/transaction/add_op', methods=['POST'])
+@require_api_key
 def add_transaction_op():
     data = request.get_json()
     transaction_id = data.get('transaction_id')
@@ -88,6 +109,7 @@ def add_transaction_op():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/transaction/commit', methods=['POST'])
+@require_api_key
 def commit_transaction():
     data = request.get_json()
     transaction_id = data.get('transaction_id')
@@ -101,6 +123,7 @@ def commit_transaction():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/transaction/rollback', methods=['POST'])
+@require_api_key
 def rollback_transaction():
     data = request.get_json()
     transaction_id = data.get('transaction_id')
@@ -113,6 +136,7 @@ def rollback_transaction():
 
 
 @app.route('/index/create', methods=['POST'])
+@require_api_key
 def create_index():
     data = request.get_json()
     index_name = data.get('index_name')
@@ -125,6 +149,7 @@ def create_index():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/query', methods=['GET'])
+@require_api_key
 def query():
     index_name = request.args.get('index_name')
     value = request.args.get('value')

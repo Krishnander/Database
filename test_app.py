@@ -206,5 +206,28 @@ class IndexTestCase(unittest.TestCase):
         self.assertIn('user3', results)
 
 
+class SecurityTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = app.test_client()
+        app.config['TESTING'] = True
+        # Set a valid API key for testing
+        import app as flask_app
+        flask_app.VALID_API_KEYS = ['test-key']
+
+    def test_missing_api_key(self):
+        response = self.app.get('/get/some_key')
+        self.assertEqual(response.status_code, 401)
+
+    def test_invalid_api_key(self):
+        response = self.app.get('/get/some_key', headers={'Authorization': 'invalid-key'})
+        self.assertEqual(response.status_code, 401)
+
+    def test_valid_api_key(self):
+        # We expect a 404 here because the key doesn't exist, but a 401
+        # would indicate an authentication failure.
+        response = self.app.get('/get/some_key', headers={'Authorization': 'test-key'})
+        self.assertEqual(response.status_code, 404)
+
+
 if __name__ == '__main__':
     unittest.main()
