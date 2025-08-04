@@ -26,6 +26,21 @@ class KeyValueStore:
         self._next_transaction_id = 0
         self._locks = {}
         self._locks_lock = threading.RLock()
+        self._indexes = {}
+
+    def create_index(self, index_name, field):
+        if index_name in self._indexes:
+            raise ValueError(f"Index '{index_name}' already exists.")
+
+        self._indexes[index_name] = {'field': field, 'index': {}}
+
+        # Build the index from existing data
+        for key, value in self._data.items():
+            if isinstance(value, dict) and field in value:
+                field_value = value[field]
+                if field_value not in self._indexes[index_name]['index']:
+                    self._indexes[index_name]['index'][field_value] = []
+                self._indexes[index_name]['index'][field_value].append(key)
 
     def begin(self):
         transaction_id = self._next_transaction_id
@@ -160,17 +175,57 @@ class KeyValueStore:
     def get(self, key):
         return self._data.get(key)
 
+    def _update_indexes_for_set(self, key, value):
+        for index_name, index_data in self._indexes.items():
+            field = index_data['field']
+            if isinstance(value, dict) and field in value:
+                field_value = value[field]
+                if field_value not in index_data['index']:
+                    index_data['index'][field_value] = []
+                if key not in index_data['index'][field_value]:
+                    index_data['index'][field_value].append(key)
+
+    def _update_indexes_for_delete(self, key, old_value):
+        for index_name, index_data in self._indexes.items():
+            field = index_data['field']
+            if isinstance(old_value, dict) and field in old_value:
+                field_value = old_value[field]
+                if field_value in index_data['index'] and key in index_data['index'][field_value]:
+                    index_data['index'][field_value].remove(key)
+                    if not index_data['index'][field_value]:
+                        del index_data['index'][field_value]
+
     def set(self, key, value, replicated=False):
+        old_value = self._data.get(key)
         self._data[key] = value
+
+        if old_value:
+            self._update_indexes_for_delete(key, old_value)
+        self._update_indexes_for_set(key, value)
+
         if self._role == 'primary':
             self._append_to_wal('set', key, value)
             self._replicate('set', key, value)
         elif replicated:
             self._append_to_wal('set', key, value)
 
+    def query(self, index_name, value):
+        if index_name not in self._indexes:
+            raise ValueError(f"Index '{index_name}' does not exist.")
+
+        index = self._indexes[index_name]['index']
+        if value in index:
+            keys = index[value]
+            return {key: self._data[key] for key in keys}
+        else:
+            return {}
+
     def delete(self, key, replicated=False):
         if key in self._data:
+            old_value = self._data[key]
             del self._data[key]
+            self._update_indexes_for_delete(key, old_value)
+
             if self._role == 'primary':
                 self._append_to_wal('delete', key)
                 self._replicate('delete', key)

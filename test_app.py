@@ -159,5 +159,52 @@ class TransactionTestCase(unittest.TestCase):
         self.assertEqual(self.db.get('b'), 0)
 
 
+class IndexTestCase(unittest.TestCase):
+    def setUp(self):
+        self.db_file = 'test_index_db.json'
+        self.wal_file = self.db_file + '.wal'
+        self.db = KeyValueStore(db_file=self.db_file)
+
+    def tearDown(self):
+        if os.path.exists(self.db_file):
+            os.remove(self.db_file)
+        if os.path.exists(self.wal_file):
+            os.remove(self.wal_file)
+
+    def test_create_index(self):
+        self.db.set('user1', {'name': 'Alice', 'age': 30})
+        self.db.create_index('age_index', 'age')
+        self.assertIn('age_index', self.db._indexes)
+        self.assertEqual(self.db._indexes['age_index']['index'][30], ['user1'])
+
+    def test_update_index_on_set(self):
+        self.db.create_index('city_index', 'city')
+        self.db.set('user1', {'name': 'Alice', 'city': 'New York'})
+        self.db.set('user2', {'name': 'Bob', 'city': 'London'})
+        self.db.set('user3', {'name': 'Charlie', 'city': 'New York'})
+
+        self.assertEqual(self.db._indexes['city_index']['index']['New York'], ['user1', 'user3'])
+        self.assertEqual(self.db._indexes['city_index']['index']['London'], ['user2'])
+
+    def test_update_index_on_delete(self):
+        self.db.create_index('city_index', 'city')
+        self.db.set('user1', {'name': 'Alice', 'city': 'New York'})
+        self.db.set('user2', {'name': 'Bob', 'city': 'London'})
+        self.db.delete('user1')
+
+        self.assertNotIn('user1', self.db._indexes['city_index']['index']['New York'])
+
+    def test_query(self):
+        self.db.create_index('age_index', 'age')
+        self.db.set('user1', {'name': 'Alice', 'age': 30})
+        self.db.set('user2', {'name': 'Bob', 'age': 40})
+        self.db.set('user3', {'name': 'Charlie', 'age': 30})
+
+        results = self.db.query('age_index', 30)
+        self.assertEqual(len(results), 2)
+        self.assertIn('user1', results)
+        self.assertIn('user3', results)
+
+
 if __name__ == '__main__':
     unittest.main()

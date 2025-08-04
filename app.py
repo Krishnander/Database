@@ -112,6 +112,39 @@ def rollback_transaction():
         return jsonify({'error': str(e)}), 400
 
 
+@app.route('/index/create', methods=['POST'])
+def create_index():
+    data = request.get_json()
+    index_name = data.get('index_name')
+    field = data.get('field')
+
+    try:
+        db.create_index(index_name, field)
+        return jsonify({'message': f"Index '{index_name}' created successfully."})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/query', methods=['GET'])
+def query():
+    index_name = request.args.get('index_name')
+    value = request.args.get('value')
+
+    # Since query params are strings, we need to try to convert them to numbers
+    try:
+        value = int(value)
+    except (ValueError, TypeError):
+        try:
+            value = float(value)
+        except (ValueError, TypeError):
+            pass
+
+    try:
+        results = db.query(index_name, value)
+        return jsonify(results)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=5000)
