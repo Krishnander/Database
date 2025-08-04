@@ -12,7 +12,7 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.db = KeyValueStore(db_file=self.db_file, wal_max_entries=3)
 
     def tearDown(self):
-        if os.path.exists(self.db_file):
+        if os.path.exists(self.db_.file):
             os.remove(self.db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)

@@ -1,6 +1,7 @@
 import json
 import os
 import requests
+import threading
 
 class KeyValueStore:
     def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
@@ -11,6 +12,14 @@ class KeyValueStore:
         self._role = role
         self._replicas = replicas if replicas is not None else []
         self._data = self._load_from_disk()
+        self._locks = {}
+        self._locks_lock = threading.RLock() # To protect access to the _locks dictionary
+
+    def _get_lock(self, key):
+        with self._locks_lock:
+            if key not in self._locks:
+                self._locks[key] = threading.RLock()
+            return self._locks[key]
 
     def add_replica(self, replica_url):
         if replica_url not in self._replicas:
@@ -82,20 +91,31 @@ class KeyValueStore:
         return self._data.get(key)
 
     def set(self, key, value, replicated=False):
-        self._data[key] = value
-        if self._role == 'primary':
-            self._append_to_wal('set', key, value)
-            self._replicate('set', key, value)
-        elif replicated:
-            self._append_to_wal('set', key, value)
+        lock = self._get_lock(key)
+        with lock:
+            self._data[key] = value
+            if self._role == 'primary':
+                self._append_to_wal('set', key, value)
+                self._replicate('set', key, value)
+            elif replicated:
+                self._append_to_wal('set', key, value)
+
+    def atomic_update(self, key, update_function):
+        lock = self._get_lock(key)
+        with lock:
+            current_value = self.get(key)
+            new_value = update_function(current_value)
+            self.set(key, new_value)
 
     def delete(self, key, replicated=False):
-        if key in self._data:
-            del self._data[key]
-            if self._role == 'primary':
-                self._append_to_wal('delete', key)
-                self._replicate('delete', key)
-            elif replicated:
-                self._append_to_wal('delete', key)
-            return True
-        return False
+        lock = self._get_lock(key)
+        with lock:
+            if key in self._data:
+                del self._data[key]
+                if self._role == 'primary':
+                    self._append_to_wal('delete', key)
+                    self._replicate('delete', key)
+                elif replicated:
+                    self._append_to_wal('delete', key)
+                return True
+            return False
