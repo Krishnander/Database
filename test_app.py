@@ -229,5 +229,28 @@ class SecurityTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class MetricsTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = app.test_client()
+        app.config['TESTING'] = True
+        # We need to initialize the db for the metrics to be created
+        import app as flask_app
+        flask_app.db = KeyValueStore()
+        flask_app.VALID_API_KEYS = ['test-key']
+
+    def test_metrics_endpoint(self):
+        # Perform some operations to increment the metrics
+        self.app.get('/get/some_key', headers={'Authorization': 'test-key'})
+        self.app.post('/set', headers={'Authorization': 'test-key'}, json={'key': 'mykey', 'value': 'myvalue'})
+
+        response = self.app.get('/metrics')
+        self.assertEqual(response.status_code, 200)
+
+        # Check for the presence of some of the metrics
+        response_text = response.data.decode('utf-8')
+        self.assertIn('db_get_operations_total', response_text)
+        self.assertIn('db_set_operations_total', response_text)
+
+
 if __name__ == '__main__':
     unittest.main()

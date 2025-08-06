@@ -2,6 +2,7 @@ import json
 import os
 import requests
 import threading
+from prometheus_client import Counter, Gauge
 
 class Transaction:
     def __init__(self, transaction_id):
@@ -13,6 +14,18 @@ class Transaction:
         self.operations.append({'op': op, 'key': key, 'value': value})
         self.keys.add(key)
 
+# Metrics
+GET_OPS = Counter('db_get_operations_total', 'Total number of get operations.')
+SET_OPS = Counter('db_set_operations_total', 'Total number of set operations.')
+DELETE_OPS = Counter('db_delete_operations_total', 'Total number of delete operations.')
+TRANSACTIONS_BEGUN = Counter('db_transactions_begun_total', 'Total number of transactions begun.')
+TRANSACTIONS_COMMITTED = Counter('db_transactions_committed_total', 'Total number of transactions committed.')
+TRANSACTIONS_ROLLED_BACK = Counter('db_transactions_rolled_back_total', 'Total number of transactions rolled back.')
+REPLICATION_EVENTS = Counter('db_replication_events_total', 'Total number of replication events.')
+INDEXES_CREATED = Counter('db_indexes_created_total', 'Total number of indexes created.')
+QUERIES = Counter('db_queries_total', 'Total number of queries.')
+TOTAL_KEYS = Gauge('db_total_keys', 'Total number of keys in the database.')
+
 class KeyValueStore:
     def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
         self._db_file = db_file
@@ -22,6 +35,7 @@ class KeyValueStore:
         self._role = role
         self._replicas = replicas if replicas is not None else []
         self._data = self._load_from_disk()
+        TOTAL_KEYS.set(len(self._data))
         self._transactions = {}
         self._next_transaction_id = 0
         self._locks = {}
@@ -29,6 +43,7 @@ class KeyValueStore:
         self._indexes = {}
 
     def create_index(self, index_name, field):
+        INDEXES_CREATED.inc()
         if index_name in self._indexes:
             raise ValueError(f"Index '{index_name}' already exists.")
 
@@ -43,6 +58,7 @@ class KeyValueStore:
                 self._indexes[index_name]['index'][field_value].append(key)
 
     def begin(self):
+        TRANSACTIONS_BEGUN.inc()
         transaction_id = self._next_transaction_id
         self._next_transaction_id += 1
         self._transactions[transaction_id] = Transaction(transaction_id)
@@ -54,6 +70,7 @@ class KeyValueStore:
         self._transactions[transaction_id].add_operation(op, key, value)
 
     def commit(self, transaction_id):
+        TRANSACTIONS_COMMITTED.inc()
         if transaction_id not in self._transactions:
             raise ValueError("Transaction not found.")
 
@@ -94,6 +111,7 @@ class KeyValueStore:
         return True
 
     def rollback(self, transaction_id):
+        TRANSACTIONS_ROLLED_BACK.inc()
         if transaction_id not in self._transactions:
             raise ValueError("Transaction not found.")
 
@@ -162,6 +180,7 @@ class KeyValueStore:
             self._compact()
 
     def _replicate(self, op, key, value=None):
+        REPLICATION_EVENTS.inc()
         for replica_url in self._replicas:
             try:
                 payload = {'op': op, 'key': key}
@@ -173,6 +192,7 @@ class KeyValueStore:
                 print(f"Error replicating to {replica_url}: {e}")
 
     def get(self, key):
+        GET_OPS.inc()
         return self._data.get(key)
 
     def _update_indexes_for_set(self, key, value):
@@ -196,8 +216,10 @@ class KeyValueStore:
                         del index_data['index'][field_value]
 
     def set(self, key, value, replicated=False):
+        SET_OPS.inc()
         old_value = self._data.get(key)
         self._data[key] = value
+        TOTAL_KEYS.set(len(self._data))
 
         if old_value:
             self._update_indexes_for_delete(key, old_value)
@@ -210,6 +232,7 @@ class KeyValueStore:
             self._append_to_wal('set', key, value)
 
     def query(self, index_name, value):
+        QUERIES.inc()
         if index_name not in self._indexes:
             raise ValueError(f"Index '{index_name}' does not exist.")
 
@@ -222,8 +245,10 @@ class KeyValueStore:
 
     def delete(self, key, replicated=False):
         if key in self._data:
+            DELETE_OPS.inc()
             old_value = self._data[key]
             del self._data[key]
+            TOTAL_KEYS.set(len(self._data))
             self._update_indexes_for_delete(key, old_value)
 
             if self._role == 'primary':
