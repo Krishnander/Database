@@ -5,10 +5,10 @@ from uhashring import HashRing
 
 app = Flask(__name__)
 
-# The addresses of the primary nodes of each shard
-SHARDS = os.environ.get('SHARDS', '').split(',') if os.environ.get('SHARDS') else []
+import argparse
 
-ring = HashRing(nodes=SHARDS)
+# This will be initialized based on command-line arguments
+ring = None
 
 def get_shard(key):
     return ring.get_node(key)
@@ -46,4 +46,20 @@ def delete_key(key):
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8000, use_reloader=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--shards', type=str, required=True)
+    parser.add_argument('--shard-weights', type=str)
+    args = parser.parse_args()
+
+    shards = args.shards.split(',')
+    shard_weights = args.shard_weights.split(',') if args.shard_weights else []
+
+    if shard_weights:
+        nodes = {shards[i]: int(shard_weights[i]) for i in range(len(shards))}
+    else:
+        nodes = shards
+
+    ring = HashRing(nodes=nodes)
+
+    app.run(debug=True, port=args.port, use_reloader=False)
