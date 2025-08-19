@@ -85,5 +85,27 @@ class RouterTestCase(unittest.TestCase):
         self.assertGreater(distribution['http://shard1'], distribution['http://shard2'] * 50)
 
 
+    def test_weighted_sharding(self):
+        # Configure the shards with weights
+        self.shards = ['http://shard1', 'http://shard2']
+        self.shard_weights = [100, 1]
+        os.environ['SHARDS'] = ','.join(self.shards)
+        os.environ['SHARD_WEIGHTS'] = ','.join(map(str, self.shard_weights))
+
+        # Create a new ring for testing
+        nodes = {self.shards[i]: self.shard_weights[i] for i in range(len(self.shards))}
+        self.ring = HashRing(nodes=nodes)
+
+        # Generate a bunch of keys and check the distribution
+        distribution = {'http://shard1': 0, 'http://shard2': 0}
+        for i in range(1000):
+            key = f"key_{i}"
+            shard = self.get_shard(key)
+            distribution[shard] += 1
+
+        # Check that the distribution is roughly proportional to the weights
+        self.assertGreater(distribution['http://shard1'], distribution['http://shard2'] * 50)
+
+
 if __name__ == '__main__':
     unittest.main()

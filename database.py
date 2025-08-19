@@ -70,7 +70,6 @@ class KeyValueStore:
         self._transactions[transaction_id].add_operation(op, key, value)
 
     def commit(self, transaction_id):
-        TRANSACTIONS_COMMITTED.inc()
         if transaction_id not in self._transactions:
             raise ValueError("Transaction not found.")
 
@@ -81,32 +80,36 @@ class KeyValueStore:
         for lock in locks:
             lock.acquire()
 
+        # Store the original values of the keys
+        original_values = {key: self._data.get(key) for key in transaction.keys}
+
         try:
             # Execute operations
             for op in transaction.operations:
                 if op['op'] == 'set':
-                    self._data[op['key']] = op['value']
-                    if self._role == 'primary':
-                        self._append_to_wal('set', op['key'], op['value'])
-                        self._replicate('set', op['key'], op['value'])
+                    self.set(op['key'], op['value'])
                 elif op['op'] == 'delete':
-                    if op['key'] in self._data:
-                        del self._data[op['key']]
-                        if self._role == 'primary':
-                            self._append_to_wal('delete', op['key'])
-                            self._replicate('delete', op['key'])
+                    self.delete(op['key'])
+            TRANSACTIONS_COMMITTED.inc()
         except Exception as e:
             # Rollback changes
-            # This is still a simplification. A real implementation would
-            # need to restore the original values of the keys.
+            for key, value in original_values.items():
+                if value is None:
+                    if key in self._data:
+                        del self._data[key]
+                else:
+                    self._data[key] = value
+
             print(f"Transaction failed, rolling back: {e}")
+            TRANSACTIONS_ROLLED_BACK.inc()
+            del self._transactions[transaction_id]
             return False
         finally:
             # Release locks
             for lock in locks:
                 lock.release()
 
-            del self._transactions[transaction_id]
+        del self._transactions[transaction_id]
 
         return True
 
@@ -190,6 +193,13 @@ class KeyValueStore:
                 requests.post(f"{replica_url}/replicate", json=payload, timeout=0.5)
             except requests.RequestException as e:
                 print(f"Error replicating to {replica_url}: {e}")
+
+    def atomic_update(self, key, update_function):
+        lock = self._get_lock(key)
+        with lock:
+            current_value = self.get(key)
+            new_value = update_function(current_value)
+            self.set(key, new_value)
 
     def get(self, key):
         GET_OPS.inc()
