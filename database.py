@@ -3,6 +3,65 @@ import os
 import requests
 import threading
 from prometheus_client import Counter, Gauge
+from abc import ABC, abstractmethod
+
+class StorageEngine(ABC):
+    @abstractmethod
+    def get(self, key):
+        pass
+
+    @abstractmethod
+    def set(self, key, value):
+        pass
+
+    @abstractmethod
+    def delete(self, key):
+        pass
+
+    @abstractmethod
+    def keys(self):
+        pass
+
+    @abstractmethod
+    def close(self):
+        pass
+
+class JSONStorageEngine(StorageEngine):
+    def __init__(self, db_file):
+        self._db_file = db_file
+        self._data = self._load_from_disk()
+
+    def _load_from_disk(self):
+        if os.path.exists(self._db_file):
+            with open(self._db_file, 'r') as f:
+                try:
+                    return json.load(f)
+                except json.JSONDecodeError:
+                    return {}
+        return {}
+
+    def _save_to_disk(self):
+        with open(self._db_file, 'w') as f:
+            json.dump(self._data, f, indent=4)
+
+    def get(self, key):
+        return self._data.get(key)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+    def delete(self, key):
+        if key in self._data:
+            del self._data[key]
+            return True
+        return False
+
+    def keys(self):
+        return self._data.keys()
+
+    def close(self):
+        self._save_to_disk()
+
 
 class Transaction:
     def __init__(self, transaction_id):
@@ -28,19 +87,38 @@ TOTAL_KEYS = Gauge('db_total_keys', 'Total number of keys in the database.')
 
 class KeyValueStore:
     def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
-        self._db_file = db_file
+        self._storage = JSONStorageEngine(db_file)
         self._wal_file = db_file + '.wal'
         self._wal_max_entries = wal_max_entries
         self._wal_entries = 0
         self._role = role
         self._replicas = replicas if replicas is not None else []
-        self._data = self._load_from_disk()
-        TOTAL_KEYS.set(len(self._data))
+        self._replay_wal()
+        TOTAL_KEYS.set(len(list(self._storage.keys())))
         self._transactions = {}
         self._next_transaction_id = 0
         self._locks = {}
         self._locks_lock = threading.RLock()
         self._indexes = {}
+
+    def _replay_wal(self):
+        # Replay WAL
+        if os.path.exists(self._wal_file):
+            with open(self._wal_file, 'r') as f:
+                for line in f:
+                    try:
+                        self._wal_entries += 1
+                        parts = json.loads(line)
+                        op = parts['op']
+                        key = parts['key']
+                        if op == 'set':
+                            value = parts['value']
+                            self._storage.set(key, value)
+                        elif op == 'delete':
+                            self._storage.delete(key)
+                    except (json.JSONDecodeError, KeyError):
+                        # Skip corrupted lines
+                        continue
 
     def create_index(self, index_name, field):
         INDEXES_CREATED.inc()
@@ -50,7 +128,8 @@ class KeyValueStore:
         self._indexes[index_name] = {'field': field, 'index': {}}
 
         # Build the index from existing data
-        for key, value in self._data.items():
+        for key in self._storage.keys():
+            value = self._storage.get(key)
             if isinstance(value, dict) and field in value:
                 field_value = value[field]
                 if field_value not in self._indexes[index_name]['index']:
@@ -81,7 +160,7 @@ class KeyValueStore:
             lock.acquire()
 
         # Store the original values of the keys
-        original_values = {key: self._data.get(key) for key in transaction.keys}
+        original_values = {key: self._storage.get(key) for key in transaction.keys}
 
         try:
             # Execute operations
@@ -95,10 +174,9 @@ class KeyValueStore:
             # Rollback changes
             for key, value in original_values.items():
                 if value is None:
-                    if key in self._data:
-                        del self._data[key]
+                    self._storage.delete(key)
                 else:
-                    self._data[key] = value
+                    self._storage.set(key, value)
 
             print(f"Transaction failed, rolling back: {e}")
             TRANSACTIONS_ROLLED_BACK.inc()
@@ -131,42 +209,8 @@ class KeyValueStore:
         if replica_url not in self._replicas:
             self._replicas.append(replica_url)
 
-    def _load_from_disk(self):
-        if os.path.exists(self._db_file):
-            with open(self._db_file, 'r') as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    data = {}
-        else:
-            data = {}
-
-        # Replay WAL
-        if os.path.exists(self._wal_file):
-            with open(self._wal_file, 'r') as f:
-                for line in f:
-                    try:
-                        self._wal_entries += 1
-                        parts = json.loads(line)
-                        op = parts['op']
-                        key = parts['key']
-                        if op == 'set':
-                            value = parts['value']
-                            data[key] = value
-                        elif op == 'delete':
-                            if key in data:
-                                del data[key]
-                    except (json.JSONDecodeError, KeyError):
-                        # Skip corrupted lines
-                        continue
-        return data
-
-    def _save_to_disk(self):
-        with open(self._db_file, 'w') as f:
-            json.dump(self._data, f, indent=4)
-
     def _compact(self):
-        self._save_to_disk()
+        self._storage.close()
         if os.path.exists(self._wal_file):
             os.remove(self._wal_file)
         self._wal_entries = 0
@@ -197,13 +241,13 @@ class KeyValueStore:
     def atomic_update(self, key, update_function):
         lock = self._get_lock(key)
         with lock:
-            current_value = self.get(key)
+            current_value = self._storage.get(key)
             new_value = update_function(current_value)
             self.set(key, new_value)
 
     def get(self, key):
         GET_OPS.inc()
-        return self._data.get(key)
+        return self._storage.get(key)
 
     def _update_indexes_for_set(self, key, value):
         for index_name, index_data in self._indexes.items():
@@ -227,9 +271,9 @@ class KeyValueStore:
 
     def set(self, key, value, replicated=False):
         SET_OPS.inc()
-        old_value = self._data.get(key)
-        self._data[key] = value
-        TOTAL_KEYS.set(len(self._data))
+        old_value = self._storage.get(key)
+        self._storage.set(key, value)
+        TOTAL_KEYS.set(len(list(self._storage.keys())))
 
         if old_value:
             self._update_indexes_for_delete(key, old_value)
@@ -249,16 +293,16 @@ class KeyValueStore:
         index = self._indexes[index_name]['index']
         if value in index:
             keys = index[value]
-            return {key: self._data[key] for key in keys}
+            return {key: self._storage.get(key) for key in keys}
         else:
             return {}
 
     def delete(self, key, replicated=False):
-        if key in self._data:
+        old_value = self._storage.get(key)
+        if old_value is not None:
             DELETE_OPS.inc()
-            old_value = self._data[key]
-            del self._data[key]
-            TOTAL_KEYS.set(len(self._data))
+            self._storage.delete(key)
+            TOTAL_KEYS.set(len(list(self._storage.keys())))
             self._update_indexes_for_delete(key, old_value)
 
             if self._role == 'primary':

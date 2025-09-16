@@ -12,8 +12,8 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.db = KeyValueStore(db_file=self.db_file, wal_max_entries=3)
 
     def tearDown(self):
-        if os.path.exists(self.db._db_file):
-            os.remove(self.db._db_file)
+        if os.path.exists(self.db._storage._db_file):
+            os.remove(self.db._storage._db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)
 
@@ -45,7 +45,7 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.db.set('b', '2')
         self.db.set('c', '3')
 
-        self.assertTrue(os.path.exists(self.db._db_file))
+        self.assertTrue(os.path.exists(self.db._storage._db_file))
         self.assertFalse(os.path.exists(self.wal_file))
 
         new_db = KeyValueStore(db_file=self.db_file)
@@ -131,8 +131,8 @@ class TransactionTestCase(unittest.TestCase):
         self.db = KeyValueStore(db_file=self.db_file)
 
     def tearDown(self):
-        if os.path.exists(self.db._db_file):
-            os.remove(self.db._db_file)
+        if os.path.exists(self.db._storage._db_file):
+            os.remove(self.db._storage._db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)
 
@@ -172,8 +172,8 @@ class IndexTestCase(unittest.TestCase):
         self.db = KeyValueStore(db_file=self.db_file)
 
     def tearDown(self):
-        if os.path.exists(self.db._db_file):
-            os.remove(self.db._db_file)
+        if os.path.exists(self.db._storage._db_file):
+            os.remove(self.db._storage._db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)
 
@@ -245,8 +245,8 @@ class ConcurrencyTestCase(unittest.TestCase):
         self.db.set('counter', 0)
 
     def tearDown(self):
-        if os.path.exists(self.db._db_file):
-            os.remove(self.db._db_file)
+        if os.path.exists(self.db._storage._db_file):
+            os.remove(self.db._storage._db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)
 
