@@ -4,6 +4,7 @@ import requests
 import threading
 from prometheus_client import Counter, Gauge
 from abc import ABC, abstractmethod
+import paxos
 
 class StorageEngine(ABC):
     @abstractmethod
@@ -86,14 +87,32 @@ QUERIES = Counter('db_queries_total', 'Total number of queries.')
 TOTAL_KEYS = Gauge('db_total_keys', 'Total number of keys in the database.')
 
 class KeyValueStore:
-    def __init__(self, db_file='database.json', wal_max_entries=100, role='primary', replicas=None):
+    def __init__(self, db_file='database.json', wal_max_entries=100, network_uid=None, peers=None, testing=False):
         self._storage = JSONStorageEngine(db_file)
         self._wal_file = db_file + '.wal'
         self._wal_max_entries = wal_max_entries
         self._wal_entries = 0
-        self._role = role
-        self._replicas = replicas if replicas is not None else []
+        self.network_uid = network_uid
+        self.peers = peers if peers is not None else []
+        self.quorum_size = len(self.peers) // 2 + 1
+        self.testing = testing
+
+        if not self.testing:
+            self.paxos = paxos.PaxosInstance(self.network_uid, self.quorum_size)
+        else:
+            class MockPaxos:
+                def __init__(self):
+                    self.leader = True  # Mock the leader attribute
+
+                def is_leader(self):
+                    return True
+
+                def get_leader_url(self):
+                    return None
+            self.paxos = MockPaxos()
+
         self._replay_wal()
+        self.paxos_log = [] # for now, in-memory log
         TOTAL_KEYS.set(len(list(self._storage.keys())))
         self._transactions = {}
         self._next_transaction_id = 0
@@ -205,10 +224,6 @@ class KeyValueStore:
                 self._locks[key] = threading.RLock()
             return self._locks[key]
 
-    def add_replica(self, replica_url):
-        if replica_url not in self._replicas:
-            self._replicas.append(replica_url)
-
     def _compact(self):
         self._storage.close()
         if os.path.exists(self._wal_file):
@@ -226,17 +241,83 @@ class KeyValueStore:
         if self._wal_entries >= self._wal_max_entries:
             self._compact()
 
-    def _replicate(self, op, key, value=None):
-        REPLICATION_EVENTS.inc()
-        for replica_url in self._replicas:
-            try:
-                payload = {'op': op, 'key': key}
-                if value is not None:
-                    payload['value'] = value
+    def _propose(self, proposal_value):
+        if self.testing:
+            self.apply_paxos_log(proposal_value)
+            return
 
-                requests.post(f"{replica_url}/replicate", json=payload, timeout=0.5)
-            except requests.RequestException as e:
-                print(f"Error replicating to {replica_url}: {e}")
+        # NOTE: This is a simplified, non-blocking simulation of Paxos for demonstration purposes.
+        # In a production-grade implementation, the following steps would be necessary:
+        # 1. The leader sends a "prepare" message to a quorum of acceptors.
+        # 2. The leader waits for "promise" responses from the acceptors. This would be a blocking,
+        #    asynchronous operation with timeouts.
+        # 3. If a quorum of promises is received, the leader sends an "accept" message with the
+        #    proposed value to the acceptors.
+        # 4. The leader waits for "accepted" responses from the acceptors.
+        # 5. Only after receiving a quorum of "accepted" messages would the leader apply the
+        #    log entry to its own state machine and then respond to the client.
+        # The current implementation sends the prepare message but then proceeds to apply the log
+        # locally without waiting for consensus, simulating a "perfect network" scenario.
+
+        prepare_msg = self.paxos.prepare()
+        for peer in self.peers:
+            if peer != self.network_uid:
+                try:
+                    requests.post(f"{peer}/paxos", json={'message_type': 'Prepare', 'from_uid': prepare_msg.from_uid, 'proposal_id': list(prepare_msg.proposal_id)})
+                except requests.RequestException as e:
+                    print(f"Error sending prepare message to {peer}: {e}")
+
+        # This is a hack to simulate the paxos flow. We apply the log directly.
+        self.apply_paxos_log(proposal_value)
+
+
+    def receive_paxos_message(self, message_data):
+        message_type = message_data.pop('message_type')
+        cls = getattr(paxos, message_type)
+
+        if 'proposal_id' in message_data and message_data['proposal_id']:
+            message_data['proposal_id'] = paxos.ProposalID(*message_data['proposal_id'])
+        if 'promised_proposal_id' in message_data and message_data['promised_proposal_id']:
+            message_data['promised_proposal_id'] = paxos.ProposalID(*message_data['promised_proposal_id'])
+        if 'last_accepted_id' in message_data and message_data['last_accepted_id']:
+            message_data['last_accepted_id'] = paxos.ProposalID(*message_data['last_accepted_id'])
+
+        message = cls(**message_data)
+
+        response = self.paxos.receive(message)
+
+        if response:
+            # In a real implementation, we would send the response back to the network.
+            # For now, we'll just log it.
+            print(f"Generated paxos response: {response}")
+
+
+    def apply_paxos_log(self, proposal):
+        op, key, value = proposal
+
+        if op == 'set':
+            SET_OPS.inc()
+            old_value = self._storage.get(key)
+            self._storage.set(key, value)
+            TOTAL_KEYS.set(len(list(self._storage.keys())))
+
+            if old_value is not None:
+                self._update_indexes_for_delete(key, old_value)
+            self._update_indexes_for_set(key, value)
+
+            self._append_to_wal('set', key, value)
+
+        elif op == 'delete':
+            old_value = self._storage.get(key)
+            if old_value is not None:
+                DELETE_OPS.inc()
+                self._storage.delete(key)
+                TOTAL_KEYS.set(len(list(self._storage.keys())))
+                self._update_indexes_for_delete(key, old_value)
+                self._append_to_wal('delete', key)
+
+        self.paxos_log.append(proposal)
+
 
     def atomic_update(self, key, update_function):
         lock = self._get_lock(key)
@@ -269,21 +350,8 @@ class KeyValueStore:
                     if not index_data['index'][field_value]:
                         del index_data['index'][field_value]
 
-    def set(self, key, value, replicated=False):
-        SET_OPS.inc()
-        old_value = self._storage.get(key)
-        self._storage.set(key, value)
-        TOTAL_KEYS.set(len(list(self._storage.keys())))
-
-        if old_value:
-            self._update_indexes_for_delete(key, old_value)
-        self._update_indexes_for_set(key, value)
-
-        if self._role == 'primary':
-            self._append_to_wal('set', key, value)
-            self._replicate('set', key, value)
-        elif replicated:
-            self._append_to_wal('set', key, value)
+    def set(self, key, value):
+        self._propose(('set', key, value))
 
     def query(self, index_name, value):
         QUERIES.inc()
@@ -297,18 +365,14 @@ class KeyValueStore:
         else:
             return {}
 
-    def delete(self, key, replicated=False):
-        old_value = self._storage.get(key)
-        if old_value is not None:
-            DELETE_OPS.inc()
-            self._storage.delete(key)
-            TOTAL_KEYS.set(len(list(self._storage.keys())))
-            self._update_indexes_for_delete(key, old_value)
+    def delete(self, key):
+        # Check if key exists before proposing, to avoid unnecessary operations
+        if self._storage.get(key) is None:
+            return False
 
-            if self._role == 'primary':
-                self._append_to_wal('delete', key)
-                self._replicate('delete', key)
-            elif replicated:
-                self._append_to_wal('delete', key)
-            return True
-        return False
+        self._propose(('delete', key, None))
+
+        # In a real async system, we'd return a future.
+        # For this simplified model, we assume the operation will eventually succeed if proposed.
+        # We check the state after our synchronous call to determine success.
+        return self._storage.get(key) is None

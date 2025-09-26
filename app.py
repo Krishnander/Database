@@ -3,6 +3,7 @@ from database import KeyValueStore
 import os
 import argparse
 import requests
+import sys
 
 app = Flask(__name__)
 
@@ -30,15 +31,15 @@ def require_api_key(f):
 def get_key(key):
     value = db.get(key)
     if value is not None:
-        return jsonify({key: value})
+        return jsonify(value=value)
     else:
         return jsonify({'error': 'Key not found'}), 404
 
 @app.route('/set', methods=['POST'])
 @require_api_key
 def set_key():
-    if db._role == 'replica':
-        return jsonify({'error': 'Cannot set key on a replica.'}), 403
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     data = request.get_json()
     if not data or 'key' not in data or 'value' not in data:
         return jsonify({'error': 'Invalid request. "key" and "value" are required.'}), 400
@@ -50,52 +51,34 @@ def set_key():
 @app.route('/delete/<key>', methods=['DELETE'])
 @require_api_key
 def delete_key(key):
-    if db._role == 'replica':
-        return jsonify({'error': 'Cannot delete key on a replica.'}), 403
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     if db.delete(key):
         return jsonify({'message': f'Key "{key}" deleted successfully.'})
     else:
         return jsonify({'error': 'Key not found'}), 404
 
-@app.route('/replicate', methods=['POST'])
-def replicate():
-    data = request.get_json()
-    op = data.get('op')
-    key = data.get('key')
-    value = data.get('value')
-
-    if op == 'set':
-        db.set(key, value, replicated=True)
-    elif op == 'delete':
-        db.delete(key, replicated=True)
-    else:
-        return jsonify({'error': 'Invalid replication operation.'}), 400
-
-    return jsonify({'message': 'Replication successful.'})
-
-@app.route('/register_replica', methods=['POST'])
-def register_replica():
-    if db._role != 'primary':
-        return jsonify({'error': 'Only the primary can register replicas.'}), 403
-
-    data = request.get_json()
-    replica_url = data.get('replica_url')
-    if not replica_url:
-        return jsonify({'error': 'replica_url is required.'}), 400
-
-    db.add_replica(replica_url)
-    return jsonify({'message': f'Replica {replica_url} registered successfully.'})
+@app.route('/paxos', methods=['POST'])
+def paxos():
+    message_data = request.get_json()
+    # In a real implementation, we would handle the response and send it back to the network
+    db.receive_paxos_message(message_data)
+    return jsonify({'message': 'ok'})
 
 
 @app.route('/transaction/begin', methods=['POST'])
 @require_api_key
 def begin_transaction():
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     transaction_id = db.begin()
     return jsonify({'transaction_id': transaction_id})
 
 @app.route('/transaction/add_op', methods=['POST'])
 @require_api_key
 def add_transaction_op():
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     data = request.get_json()
     transaction_id = data.get('transaction_id')
     op = data.get('op')
@@ -111,6 +94,8 @@ def add_transaction_op():
 @app.route('/transaction/commit', methods=['POST'])
 @require_api_key
 def commit_transaction():
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     data = request.get_json()
     transaction_id = data.get('transaction_id')
 
@@ -125,6 +110,8 @@ def commit_transaction():
 @app.route('/transaction/rollback', methods=['POST'])
 @require_api_key
 def rollback_transaction():
+    if not db.paxos.leader:
+        return jsonify({'error': 'Not the leader. Please send write requests to the leader.'}), 403
     data = request.get_json()
     transaction_id = data.get('transaction_id')
 
@@ -147,6 +134,18 @@ def create_index():
         return jsonify({'message': f"Index '{index_name}' created successfully."})
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    return jsonify({
+        'leader': db.paxos.leader,
+        'network_uid': db.network_uid
+    })
+
+@app.route('/force_leader', methods=['POST'])
+def force_leader():
+    db.paxos.leader = True
+    return jsonify({'message': 'OK'})
 
 @app.route('/query', methods=['GET'])
 @require_api_key
@@ -181,28 +180,19 @@ app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=5000)
-    parser.add_argument('--role', type=str, default='primary', choices=['primary', 'replica'])
-    parser.add_argument('--primary-address', type=str)
-    parser.add_argument('--replicas', type=str)
+    parser.add_argument('--peers', type=str, required=True)
     args = parser.parse_args()
 
-    replicas = args.replicas.split(',') if args.replicas else []
+    my_address = f"http://localhost:{args.port}"
+    peers = args.peers.split(',')
 
     # Use a unique database file for each instance
     db_file = f'database_{args.port}.json'
 
-    db = KeyValueStore(db_file=db_file, role=args.role, replicas=replicas)
+    db = KeyValueStore(db_file=db_file, network_uid=my_address, peers=peers)
 
-    if args.role == 'replica':
-        if not args.primary_address:
-            raise ValueError('A primary address must be specified for a replica.')
-
-        # Register with the primary
-        try:
-            my_address = f"http://localhost:{args.port}"
-            requests.post(f"{args.primary_address}/register_replica", json={'replica_url': my_address})
-        except requests.RequestException as e:
-            print(f"Could not register with primary: {e}")
-
+    # Manually set one node as the leader for now for testing purposes
+    if args.port == 5000:
+        db.paxos.leader = True
 
     app.run(debug=True, port=args.port, use_reloader=False)

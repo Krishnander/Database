@@ -2,3 +2,4 @@ Flask
 requests
 uhashring
 prometheus-client
+composable-paxos

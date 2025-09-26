@@ -9,17 +9,13 @@ class KeyValueStoreTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_database.json'
         self.wal_file = self.db_file + '.wal'
-        self.db = KeyValueStore(db_file=self.db_file, wal_max_entries=3)
+        self.db = KeyValueStore(db_file=self.db_file, wal_max_entries=3, testing=True)
 
     def tearDown(self):
         if os.path.exists(self.db._storage._db_file):
             os.remove(self.db._storage._db_file)
         if os.path.exists(self.wal_file):
             os.remove(self.wal_file)
-
-    def test_add_replica(self):
-        self.db.add_replica('http://localhost:5001')
-        self.assertIn('http://localhost:5001', self.db._replicas)
 
     def test_set_get(self):
         self.db.set('name', 'Jules')
@@ -36,7 +32,7 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.db.set('capital', 'Paris')
         self.db.delete('country')
 
-        new_db = KeyValueStore(db_file=self.db_file)
+        new_db = KeyValueStore(db_file=self.db_file, testing=True)
         self.assertEqual(new_db.get('capital'), 'Paris')
         self.assertIsNone(new_db.get('country'))
 
@@ -48,7 +44,7 @@ class KeyValueStoreTestCase(unittest.TestCase):
         self.assertTrue(os.path.exists(self.db._storage._db_file))
         self.assertFalse(os.path.exists(self.wal_file))
 
-        new_db = KeyValueStore(db_file=self.db_file)
+        new_db = KeyValueStore(db_file=self.db_file, testing=True)
         self.assertEqual(new_db.get('a'), '1')
         self.assertEqual(new_db.get('b'), '2')
         self.assertEqual(new_db.get('c'), '3')
@@ -56,13 +52,12 @@ class KeyValueStoreTestCase(unittest.TestCase):
 
 class FlaskApiTestCase(unittest.TestCase):
     def setUp(self):
-        self.primary_db_file = 'test_primary_db.json'
-        self.replica_db_file = 'test_replica_db.json'
-        self.primary_wal_file = self.primary_db_file + '.wal'
-        self.replica_wal_file = self.replica_db_file + '.wal'
+        self.db_file = 'test_api_db.json'
+        self.wal_file = self.db_file + '.wal'
+        self.db = KeyValueStore(db_file=self.db_file, testing=True)
 
-        self.primary_db = KeyValueStore(db_file=self.primary_db_file, role='primary')
-        self.replica_db = KeyValueStore(db_file=self.replica_db_file, role='replica')
+        self.patcher = patch('app.db', self.db)
+        self.patcher.start()
 
         app.config['TESTING'] = True
         self.app = app.test_client()
@@ -70,65 +65,39 @@ class FlaskApiTestCase(unittest.TestCase):
         flask_app.VALID_API_KEYS = ['test-key']
 
     def tearDown(self):
-        for f in [self.primary_db_file, self.replica_db_file, self.primary_wal_file, self.replica_wal_file]:
-            if os.path.exists(f):
-                os.remove(f)
+        self.patcher.stop()
+        if os.path.exists(self.db_file):
+            os.remove(self.db_file)
+        if os.path.exists(self.wal_file):
+            os.remove(self.wal_file)
 
-    def test_register_replica_api(self):
-        import app as flask_app
-        flask_app.db = self.primary_db
-
-        response = self.app.post('/register_replica',
-                                 headers={'Authorization': 'test-key'},
-                                 data=json.dumps({'replica_url': 'http://localhost:5001'}),
-                                 content_type='application/json')
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('http://localhost:5001', self.primary_db._replicas)
-
-    def test_replicate_api(self):
-        import app as flask_app
-        flask_app.db = self.replica_db
-
-        response = self.app.post('/replicate',
-                                 headers={'Authorization': 'test-key'},
-                                 data=json.dumps({'op': 'set', 'key': 'color', 'value': 'blue'}),
-                                 content_type='application/json')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.replica_db.get('color'), 'blue')
-
-    @patch('requests.post')
-    def test_replication_on_set(self, mock_post):
-        import app as flask_app
-        flask_app.db = self.primary_db
-        self.primary_db.add_replica('http://localhost:5001')
-
+    def test_set_get_delete_api(self):
+        # Test setting a value
         response = self.app.post('/set',
                                  headers={'Authorization': 'test-key'},
-                                 data=json.dumps({'key': 'animal', 'value': 'cat'}),
+                                 data=json.dumps({'key': 'drink', 'value': 'water'}),
                                  content_type='application/json')
         self.assertEqual(response.status_code, 200)
-        mock_post.assert_called_once_with(
-            'http://localhost:5001/replicate',
-            json={'op': 'set', 'key': 'animal', 'value': 'cat'},
-            timeout=0.5
-        )
 
-    def test_write_on_replica_rejected(self):
-        import app as flask_app
-        flask_app.db = self.replica_db
+        # Test getting a value
+        response = self.app.get('/get/drink', headers={'Authorization': 'test-key'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['value'], 'water')
 
-        response = self.app.post('/set',
-                                 headers={'Authorization': 'test-key'},
-                                 data=json.dumps({'key': 'food', 'value': 'pizza'}),
-                                 content_type='application/json')
-        self.assertEqual(response.status_code, 403)
+        # Test deleting a value
+        response = self.app.delete('/delete/drink', headers={'Authorization': 'test-key'})
+        self.assertEqual(response.status_code, 200)
+
+        # Verify value is deleted
+        response = self.app.get('/get/drink', headers={'Authorization': 'test-key'})
+        self.assertEqual(response.status_code, 404)
 
 
 class TransactionTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_transaction_db.json'
         self.wal_file = self.db_file + '.wal'
-        self.db = KeyValueStore(db_file=self.db_file)
+        self.db = KeyValueStore(db_file=self.db_file, testing=True)
 
     def tearDown(self):
         if os.path.exists(self.db._storage._db_file):
@@ -169,7 +138,7 @@ class IndexTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_index_db.json'
         self.wal_file = self.db_file + '.wal'
-        self.db = KeyValueStore(db_file=self.db_file)
+        self.db = KeyValueStore(db_file=self.db_file, testing=True)
 
     def tearDown(self):
         if os.path.exists(self.db._storage._db_file):
@@ -214,11 +183,19 @@ class IndexTestCase(unittest.TestCase):
 
 class SecurityTestCase(unittest.TestCase):
     def setUp(self):
+        # This test case doesn't need a real db file, but we need to patch the db instance
+        self.db = KeyValueStore(db_file='test_security_db.json', testing=True)
+        self.patcher = patch('app.db', self.db)
+        self.patcher.start()
+
         self.app = app.test_client()
         app.config['TESTING'] = True
         # Set a valid API key for testing
         import app as flask_app
         flask_app.VALID_API_KEYS = ['test-key']
+
+    def tearDown(self):
+        self.patcher.stop()
 
     def test_missing_api_key(self):
         response = self.app.get('/get/some_key')
@@ -241,7 +218,7 @@ class ConcurrencyTestCase(unittest.TestCase):
     def setUp(self):
         self.db_file = 'test_concurrency_db.json'
         self.wal_file = self.db_file + '.wal'
-        self.db = KeyValueStore(db_file=self.db_file)
+        self.db = KeyValueStore(db_file=self.db_file, testing=True)
         self.db.set('counter', 0)
 
     def tearDown(self):
@@ -269,29 +246,6 @@ class ConcurrencyTestCase(unittest.TestCase):
 
         expected_value = num_threads * num_iterations_per_thread
         self.assertEqual(self.db.get('counter'), expected_value)
-
-
-class SecurityTestCase(unittest.TestCase):
-    def setUp(self):
-        self.app = app.test_client()
-        app.config['TESTING'] = True
-        # Set a valid API key for testing
-        import app as flask_app
-        flask_app.VALID_API_KEYS = ['test-key']
-
-    def test_missing_api_key(self):
-        response = self.app.get('/get/some_key')
-        self.assertEqual(response.status_code, 401)
-
-    def test_invalid_api_key(self):
-        response = self.app.get('/get/some_key', headers={'Authorization': 'invalid-key'})
-        self.assertEqual(response.status_code, 401)
-
-    def test_valid_api_key(self):
-        # We expect a 404 here because the key doesn't exist, but a 401
-        # would indicate an authentication failure.
-        response = self.app.get('/get/some_key', headers={'Authorization': 'test-key'})
-        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == '__main__':
