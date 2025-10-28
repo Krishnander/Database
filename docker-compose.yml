@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  router:
+    build: .
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "python router.py"
+    environment:
+      - SHARDS=http://shard1-primary:5000,http://shard2-primary:5002
+
+  shard1-primary:
+    build: .
+    command: >
+      sh -c "python app.py --port 5000 --role primary --replicas http://shard1-replica:5001"
+
+  shard1-replica:
+    build: .
+    command: >
+      sh -c "sleep 5 && python app.py --port 5001 --role replica --primary-address http://shard1-primary:5000"
+    depends_on:
+      - shard1-primary
+
+  shard2-primary:
+    build: .
+    command: >
+      sh -c "python app.py --port 5002 --role primary --replicas http://shard2-replica:5003"
+
+  shard2-replica:
+    build: .
+    command: >
+      sh -c "sleep 5 && python app.py --port 5003 --role replica --primary-address http://shard2-primary:5002"
+    depends_on:
+      - shard2-primary
